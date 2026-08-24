@@ -1,0 +1,137 @@
+---
+title: "Simple test model with and without look-up tables in Stan"
+format: html
+editor: visual
+---
+
+We consider a test problem involving a fixed non-linear transformation $V_x$, $$y_i = V_x(a+bx_i)+\sigma \xi_i,\\
+\xi_i \sim N(0,1)\; iid,\\
+V_x(x)=0.2x+x^5,$$ where $V_x$ is treated as a known empirical function that will be implemented using a look-up table. We start by generating some tabular data.
+
+```{r}
+require(tidyverse)
+Vfun <- \(x)(0.2*x+x^5)
+Vx_data <- tibble( x=seq(-2,2,0.1) ) |> mutate(Vx=Vfun(x))
+
+```
+
+Next, we choose values for the fit parameters $a,b,\sigma$ and generate some synthetic data.
+
+```{r}
+a <- 0.2
+b <- 1.5
+sig <- 0.25
+
+set.seed(123) # reproducible random numbers
+xi <- runif(30)
+yi <- Vfun(a+b*xi)+sig*rnorm(length(xi))
+train_data <- tibble(  x=xi, yi=yi)
+
+
+tibble( type="truth", x=seq(0,1,0.01)) |> 
+  mutate( Vx=Vfun(a+b*x) ) |> 
+  ggplot(aes(x=x, y=Vx, color=type))+
+  geom_line()+
+  geom_point(data = train_data |> rename(Vx=yi) |> mutate(type="data"))+
+  labs( y="y", color="")
+```
+
+Next, we fit the model with cmdstan using
+
+1.  the true functional form for $V_x(x)$ in the Stan model file, and
+2.  a spline lookup table built on tabulated data, and
+3.  a pchip look-up table built on tabulated data.
+
+We use somewhat long sampling partly to test reproducibility and run times..
+
+```{r}
+library(cmdstanr)
+require(posterior)
+
+stan_data1 <- list(
+  N = nrow(train_data),
+  x = train_data$x,
+  y = train_data$yi
+)
+
+stan_data2 <- list(
+  N = nrow(train_data),
+  x = train_data$x,
+  y = train_data$yi,
+  K = nrow(Vx_data),
+  xk = Vx_data$x,
+  Vk = Vx_data$Vx
+)
+
+mod1 <- cmdstan_model("Vx_true_function.stan")
+fit1 <- mod1$sample(
+  data = stan_data1,
+  chains = 4,
+  parallel_chains = 4,
+  iter_warmup = 5000,
+  iter_sampling = 20000,
+  thin=20,
+  seed = 123
+)
+
+mod2 <- cmdstan_model("Vx_spline_lookup.stan")
+fit2 <- mod2$sample(
+  data = stan_data2,
+  chains = 4,
+  parallel_chains = 4,
+  iter_warmup = 5000,
+  iter_sampling = 20000,
+  thin=20,
+  seed = 123
+)
+
+mod3 <- cmdstan_model("Vx_pchip_lookup.stan")
+fit3 <- mod3$sample(
+  data = stan_data2,
+  chains = 4,
+  parallel_chains = 4,
+  iter_warmup = 5000,
+  iter_sampling = 20000,
+  thin=20,
+  seed = 123
+)
+
+```
+
+The results are reproduced quite well.
+
+```{r}
+rbind(
+  fit3 |> 
+    as_draws() |> 
+    subset_draws(c("a","b","sigma")) |> 
+    summarise_draws("mean", "mcse_mean", "sd","mcse_sd", "rhat", "ess_bulk") |> 
+    mutate(Vx="pchip"),
+  fit2 |> 
+    as_draws() |> 
+    subset_draws(c("a","b","sigma")) |> 
+    summarise_draws("mean", "mcse_mean", "sd","mcse_sd", "rhat", "ess_bulk") |> 
+    mutate(Vx="spline"),
+  fit1 |> 
+    as_draws() |> 
+    subset_draws(c("a","b","sigma")) |> 
+    summarise_draws("mean", "mcse_mean", "sd","mcse_sd", "rhat", "ess_bulk") |> 
+    mutate(Vx="true Vx")
+)  |> 
+  relocate(Vx, .before = 1) |> 
+  arrange(variable,Vx)
+```
+
+However, the run times with look-up tables are quite a bit longer than using the true expression. The stan implementations are probably far from optimal, even if it is probably not possible to be as fast as evaluating a single small polynomial.
+
+```{r}
+rbind(
+  fit1$time()$chains |> as_data_frame() |> mutate(model="true"),
+  fit2$time()$chains |> as_data_frame() |> mutate(model="spline"),
+  fit3$time()$chains |> as_data_frame() |> mutate(model="pchip")
+) |> 
+  group_by(model) |> 
+  summarise(
+    avg_sec_per_chain=mean(total)
+    )
+```

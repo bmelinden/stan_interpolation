@@ -1,0 +1,135 @@
+// Natural cubic spline second derivatives at the knots.
+vector spline_second_derivatives(vector xk, vector yk) {
+  int K = num_elements(xk);
+  vector[K - 1] h;
+  vector[K - 1] delta;
+  vector[K] second_deriv = rep_vector(0, K);
+  
+  for (i in 1 : (K - 1)) {
+    h[i] = xk[i + 1] - xk[i];
+    delta[i] = (yk[i + 1] - yk[i]) / h[i];
+  }
+  
+  if (K == 2) {
+    return second_deriv;
+  }
+  
+  {
+    vector[K] c_prime = rep_vector(0, K);
+    vector[K] d_prime = rep_vector(0, K);
+    real denom = 2 * (h[1] + h[2]);
+    real rhs = 6 * (delta[2] - delta[1]);
+    
+    c_prime[2] = h[2] / denom;
+    d_prime[2] = rhs / denom;
+    
+    if (K > 3) {
+      for (i in 3 : (K - 1)) {
+        real h_lower = h[i - 1];
+        real diag = 2 * (h[i - 1] + h[i]);
+        real h_upper = h[i];
+        
+        denom = diag - h_lower * c_prime[i - 1];
+        rhs = 6 * (delta[i] - delta[i - 1]);
+        c_prime[i] = h_upper / denom;
+        d_prime[i] = (rhs - h_lower * d_prime[i - 1]) / denom;
+      }
+    }
+    
+    second_deriv[K - 1] = d_prime[K - 1];
+    {
+      int i = K - 2;
+      
+      while (i >= 2) {
+        second_deriv[i] = d_prime[i] - c_prime[i] * second_deriv[i + 1];
+        i = i - 1;
+      }
+    }
+  }
+  
+  return second_deriv;
+}
+
+// Precompute natural cubic spline coefficients for each interval.
+// Row i contains [a, b, c, d] such that
+// f(x) = a + b*t + c*t^2 + d*t^3, t = x - xk[i].
+tuple(matrix, vector) spline_setup(vector xk, vector yk) {
+  int K = num_elements(xk);
+  
+  if (K < 2) {
+    reject("xk must contain at least 2 points; found ", K);
+  }
+  if (num_elements(yk) != K) {
+    reject("xk and yk must have the same number of elements; found ",
+           "num_elements(xk) = ", K, " and num_elements(yk) = ",
+           num_elements(yk));
+  }
+  for (k in 1 : K) {
+    if (is_nan(xk[k]) || is_inf(xk[k])) {
+      reject("xk must be finite; found xk[", k, "] = ", xk[k]);
+    }
+    if (is_nan(yk[k]) || is_inf(yk[k])) {
+      reject("yk must be finite; found yk[", k, "] = ", yk[k]);
+    }
+  }
+  for (k in 2 : K) {
+    if (xk[k] <= xk[k - 1]) {
+      reject("xk must be strictly increasing; found xk[", k - 1, "] = ",
+             xk[k - 1], " and xk[", k, "] = ", xk[k]);
+    }
+  }
+  
+  vector[K] second_deriv = spline_second_derivatives(xk, yk);
+  matrix[K - 1, 4] coef;
+  
+  for (i in 1 : (K - 1)) {
+    real h = xk[i + 1] - xk[i];
+    real dy = yk[i + 1] - yk[i];
+    
+    coef[i, 1] = yk[i];
+    coef[i, 2] = dy / h
+                 - h * (2 * second_deriv[i] + second_deriv[i + 1]) / 6;
+    coef[i, 3] = second_deriv[i] / 2;
+    coef[i, 4] = (second_deriv[i + 1] - second_deriv[i]) / (6 * h);
+  }
+  
+  return (coef, xk);
+}
+
+real spline_eval(real x, tuple(matrix, vector) W) {
+  matrix[rows(W.1), cols(W.1)] coef = W.1;
+  vector[num_elements(W.2)] xk = W.2;
+  int K = num_elements(xk);
+  int i;
+  int lo = 1;
+  int hi = K;
+  real t;
+  
+  if (x <= xk[1]) {
+    return coef[1, 1] + coef[1, 2] * (x - xk[1]);
+  } else if (x >= xk[K]) {
+    int last = K - 1;
+    real h = xk[K] - xk[last];
+    real y_right = ((coef[last, 4] * h + coef[last, 3]) * h
+                    + coef[last, 2]) * h
+                   + coef[last, 1];
+    real slope_right = (3 * coef[last, 4] * h + 2 * coef[last, 3]) * h
+                       + coef[last, 2];
+    
+    return y_right + slope_right * (x - xk[K]);
+  }
+  
+  while (hi - lo > 1) {
+    int mid = (lo + hi) %/% 2;
+    
+    if (x < xk[mid]) {
+      hi = mid;
+    } else {
+      lo = mid;
+    }
+  }
+  
+  i = lo;
+  t = x - xk[i];
+  return ((coef[i, 4] * t + coef[i, 3]) * t + coef[i, 2]) * t + coef[i, 1];
+}
